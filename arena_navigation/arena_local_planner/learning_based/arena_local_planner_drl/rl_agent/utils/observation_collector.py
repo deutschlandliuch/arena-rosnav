@@ -41,8 +41,10 @@ class ObservationCollector():
         # define observation_space
         self.observation_space = ObservationCollector._stack_spaces((
             spaces.Box(low=0, high=lidar_range, shape=(num_lidar_beams,), dtype=np.float32),
-            spaces.Box(low=0, high=10, shape=(1,), dtype=np.float32) ,
-            spaces.Box(low=-np.pi, high=np.pi, shape=(1,), dtype=np.float32) 
+            spaces.Box(low=-5, high=30, shape=(1,), dtype=np.float32) ,
+            spaces.Box(low=-5, high=25, shape=(1,), dtype=np.float32) ,
+            spaces.Box(low=-np.pi, high=np.pi, shape=(1,), dtype=np.float32) ,
+            spaces.Box(low=np.array([-5, -5]), high=np.array([30, 25]), dtype=np.float32)
         ))
 
         # flag of new sensor info
@@ -68,10 +70,8 @@ class ObservationCollector():
         self._subgoal_sub.registerCallback(self.callback_subgoal)
         
         # service clients
-        self._is_train_mode = rospy.get_param("train_mode")
-        if self._is_train_mode:
-            self._service_name_step='step_world'
-            self._sim_step_client = rospy.ServiceProxy(self._service_name_step, StepWorld)
+        self._service_name_step='step_world'
+        self._sim_step_client = rospy.ServiceProxy(self._service_name_step, StepWorld)
 
 
     
@@ -81,17 +81,21 @@ class ObservationCollector():
     def get_observations(self):
         # reset flag 
         self._flag_all_received=False
-        if self._is_train_mode: 
+        
         # sim a step forward until all sensor msg uptodate
-            i=0
-            while(self._flag_all_received==False):
-                self.call_service_takeSimStep()
-                i+=1
+        i=0
+        while(self._flag_all_received==False):
+            self.call_service_takeSimStep()
+            i+=1
         # rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
         #print(f"Current observation takes {i} steps for Synchronization")
         scan=self._scan.ranges.astype(np.float32)
         rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(self._subgoal,self._robot_pose)
-        merged_obs = np.hstack([scan, np.array([rho,theta])])
+        
+        rob_x, rob_y, rob_theta = self._robot_pose.x, self._robot_pose.y, self._robot_pose.theta
+        goal_x, goal_y = self._subgoal.x, self._subgoal.y
+        #merged_obs = np.hstack([scan, np.array([rho,theta])])
+        merged_obs = np.hstack([scan, np.array([rob_x, rob_y, rob_theta, goal_x, goal_y])])
         obs_dict = {}
         obs_dict["laser_scan"] = scan
         obs_dict['goal_in_robot_frame'] = [rho,theta]
