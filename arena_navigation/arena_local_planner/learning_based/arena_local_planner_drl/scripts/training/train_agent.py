@@ -1,9 +1,10 @@
-import os
+import os, sys
 import rospy
 import time
 import rosnode
 from typing import Union
 from datetime import datetime as dt
+import warnings
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
@@ -18,29 +19,6 @@ from arena_navigation.arena_local_planner.learning_based.arena_local_planner_drl
 from arena_navigation.arena_local_planner.learning_based.arena_local_planner_drl.tools.train_agent_utils import *
 from arena_navigation.arena_local_planner.learning_based.arena_local_planner_drl.tools.custom_mlp_utils import *
 from arena_navigation.arena_local_planner.learning_based.arena_local_planner_drl.tools.staged_train_callback import InitiateNewTrainStage
-
-##### HYPERPARAMETER #####
-""" will be used upon initializing new agent """
-robot = "myrobot"
-gamma = 0.99
-n_steps = 4800
-ent_coef = 0.005
-learning_rate = 3e-4
-vf_coef = 0.2
-max_grad_norm = 0.5
-gae_lambda = 0.95
-batch_size = 15
-n_epochs = 3
-clip_range = 0.2
-reward_fnc = "rule_03"
-discrete_action_space = False
-start_stage = 1
-train_max_steps_per_episode = 500
-eval_max_steps_per_episode = 500
-goal_radius = 0.25
-task_mode = "staged"    # custom, random or staged
-normalize = True
-##########################
 
 
 def get_agent_name(args) -> str:
@@ -87,7 +65,10 @@ def get_paths(agent_name: str, args) -> dict:
         'robot_setting': 
             os.path.join(
                 rospkg.RosPack().get_path('simulator_setup'),
-                'robot', robot + '.model.yaml'),
+                'robot', 'myrobot' + '.model.yaml'),
+        'hyperparams':
+            os.path.join(
+                dir, 'configs', 'hyperparameters'),
         'robot_as': 
             os.path.join(
                 dir, 'configs', 'default_settings.yaml'),
@@ -145,7 +126,7 @@ def make_envs(task_manager: Union[RandomTask, StagedRandomTask, ManualTask, Scen
         if train:
             # train env
             env = FlatlandEnv(
-                f"sim_0{rank+1}", task_manager, 
+                f"sim_{rank+1}", task_manager, 
                 PATHS.get('robot_setting'), PATHS.get('robot_as'), 
                 params['reward_fnc'], params['discrete_action_space'], 
                 goal_radius=params['goal_radius'], 
@@ -155,7 +136,7 @@ def make_envs(task_manager: Union[RandomTask, StagedRandomTask, ManualTask, Scen
             # eval env
             env = Monitor(
                 FlatlandEnv(
-                    f"sim_0{rank+1}", task_manager, 
+                    f"sim_{rank+1}", task_manager, 
                     PATHS.get('robot_setting'), PATHS.get('robot_as'), 
                     params['reward_fnc'], params['discrete_action_space'], 
                     goal_radius=params['goal_radius'], 
@@ -182,31 +163,33 @@ if __name__ == "__main__":
     print("________ STARTING TRAINING WITH:  %s ________\n" % AGENT_NAME)
 
     # check if simulations are booted
+    timeout = 30
     for i in range(args.n_envs):
-        ns = rosnode.get_node_names(namespace='sim_0'+str(i+1))
-        assert (len(ns) > 0
-        ), f"Check if {args.n_envs} different simulation environments are running"
-        assert (len(ns) > 2
-        ), f"Check if all simulation parts of namespace '{'/sim_0'+str(i+1)}' are running properly"
+        for k in range(timeout):
+            ns = rosnode.get_node_names(namespace='sim_'+str(i+1))
 
+            if len(ns) < 3:
+                warnings.warn(f"Check if all simulation parts of namespace '{'/sim_'+str(i+1)}' are running properly")
+                warnings.warn(f"Trying to connect again..")
+            else:
+                break
+
+            assert (k < timeout-1
+            ), f"Timeout while trying to connect to nodes of '{'/sim_'+str(i+1)}'"
+
+            time.sleep(1)
+        
+            
     # initialize hyperparameters (save to/ load from json)
-    hyperparams_obj = agent_hyperparams(
-        AGENT_NAME, robot, gamma, n_steps, ent_coef, 
-        learning_rate, vf_coef,max_grad_norm, gae_lambda, batch_size, 
-        n_epochs, clip_range, reward_fnc, discrete_action_space, normalize, 
-        task_mode, start_stage, train_max_steps_per_episode,
-        eval_max_steps_per_episode, goal_radius)
-
     params = initialize_hyperparameters(
-        agent_name=AGENT_NAME,           PATHS=PATHS, 
-        hyperparams_obj=hyperparams_obj, load_target=args.load)
+        PATHS=PATHS, load_target=args.load, config_name=args.config)
 
     # task managers for each simulation
     task_managers=[]
     for i in range(args.n_envs):
         task_managers.append(
             get_predefined_task(
-                f"sim_0{i+1}", params['task_mode'], params['curr_stage'], PATHS))
+                f"sim_{i+1}", params['task_mode'], params['curr_stage'], PATHS))
 
     # instantiate gym environment
     # when debug run on one process only
@@ -235,7 +218,7 @@ if __name__ == "__main__":
     
     # stop training on reward threshold callback
     stoptraining_cb = StopTrainingOnRewardThreshold(
-        reward_threshold=6, task_manager=task_managers[0], verbose=1)
+        reward_threshold=13.75, task_manager=task_managers[0], verbose=1)
 
     # instantiate eval environment
     # take task_manager from first sim (currently evaluation only provided for single process)
@@ -252,7 +235,7 @@ if __name__ == "__main__":
     # eval_freq: evaluate the agent every eval_freq train timesteps
     eval_cb = EvalCallback(
         eval_env, 
-        n_eval_episodes=10,         eval_freq=500, 
+        n_eval_episodes=40,         eval_freq=25000, 
         log_path=PATHS.get('eval'), best_model_save_path=PATHS.get('model'), 
         deterministic=True,         callback_on_eval_end=trainstage_cb,
         callback_on_new_best=stoptraining_cb)
@@ -264,24 +247,24 @@ if __name__ == "__main__":
             "MlpPolicy", env, 
             policy_kwargs = dict(
                 net_arch = args.net_arch, activation_fn = get_act_fn(args.act_fn)), 
-            gamma = gamma,                     n_steps = n_steps, 
-            ent_coef = ent_coef,               learning_rate = learning_rate, 
-            vf_coef = vf_coef,                 max_grad_norm = max_grad_norm, 
-            gae_lambda = gae_lambda,           batch_size = batch_size, 
-            n_epochs = n_epochs,               clip_range = clip_range, 
-            tensorboard_log = PATHS.get('tb'), verbose = 1
+            gamma = params['gamma'],                     n_steps = params['n_steps'], 
+            ent_coef = params['ent_coef'],               learning_rate = params['learning_rate'], 
+            vf_coef = params['vf_coef'],                 max_grad_norm = params['max_grad_norm'], 
+            gae_lambda = params['gae_lambda'],           batch_size = params['batch_size'], 
+            n_epochs = params['n_epochs'],               clip_range = params['clip_range'], 
+            tensorboard_log = PATHS.get('tb'),           verbose = 1
         )
     elif args.agent is not None:
         # predefined agent flag
         if args.agent == "MLP_ARENA2D":
                 model = PPO(
                     MLP_ARENA2D_POLICY, env, 
-                    gamma = gamma,                     n_steps = n_steps, 
-                    ent_coef = ent_coef,               learning_rate = learning_rate, 
-                    vf_coef = vf_coef,                 max_grad_norm = max_grad_norm, 
-                    gae_lambda = gae_lambda,           batch_size = batch_size, 
-                    n_epochs = n_epochs,               clip_range = clip_range, 
-                    tensorboard_log = PATHS.get('tb'), verbose = 1
+                    gamma = params['gamma'],            n_steps = params['n_steps'], 
+                    ent_coef = params['ent_coef'],      learning_rate = params['learning_rate'], 
+                    vf_coef = params['vf_coef'],        max_grad_norm = params['max_grad_norm'], 
+                    gae_lambda = params['gae_lambda'],  batch_size = params['batch_size'], 
+                    n_epochs = params['n_epochs'],      clip_range = params['clip_range'], 
+                    tensorboard_log = PATHS.get('tb'),  verbose = 1
                 )
 
         elif args.agent == "DRL_LOCAL_PLANNER" or args.agent == "CNN_NAVREP":
@@ -293,12 +276,12 @@ if __name__ == "__main__":
             model = PPO(
                 "CnnPolicy", env, 
                 policy_kwargs = policy_kwargs, 
-                gamma = gamma,                     n_steps = n_steps, 
-                ent_coef = ent_coef,               learning_rate = learning_rate, 
-                vf_coef = vf_coef,                 max_grad_norm = max_grad_norm, 
-                gae_lambda = gae_lambda,           batch_size = batch_size, 
-                n_epochs = n_epochs,               clip_range = clip_range, 
-                tensorboard_log = PATHS.get('tb'), verbose = 1
+                gamma = params['gamma'],            n_steps = params['n_steps'], 
+                ent_coef = params['ent_coef'],      learning_rate = params['learning_rate'], 
+                vf_coef = params['vf_coef'],        max_grad_norm = params['max_grad_norm'], 
+                gae_lambda = params['gae_lambda'],  batch_size = params['batch_size'], 
+                n_epochs = params['n_epochs'],      clip_range = params['clip_range'], 
+                tensorboard_log = PATHS.get('tb'),  verbose = 1
             )
     else:
         # load flag
@@ -314,7 +297,7 @@ if __name__ == "__main__":
 
     # set num of timesteps to be generated
     if args.n is None:
-        n_timesteps = 20000000
+        n_timesteps = 40000000
     else:
         n_timesteps = args.n
 
@@ -322,7 +305,7 @@ if __name__ == "__main__":
     start = time.time()
     model.learn(
         total_timesteps = n_timesteps, callback=eval_cb, reset_num_timesteps=True)
-    print(f'Time passed for {n_timesteps} timesteps: {time.time()-start}s')
+    print(f'Time passed: {time.time()-start}s')
 
     # update the timesteps the model has trained in total
     update_total_timesteps_json(n_timesteps, PATHS)
