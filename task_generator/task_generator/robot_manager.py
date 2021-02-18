@@ -39,7 +39,8 @@ class RobotManager:
         # setup proxy to handle  services provided by flatland
         rospy.wait_for_service(f'{self.ns_prefix}move_model', timeout=timeout)
         rospy.wait_for_service(f'{self.ns_prefix}spawn_model', timeout=timeout)
-        #rospy.wait_for_service('step_world', timeout=20)
+        if self.is_training_mode:
+            rospy.wait_for_service(f'{self.ns_prefix}step_world', timeout=timeout)
         self._srv_move_model = rospy.ServiceProxy(
             f'{self.ns_prefix}move_model', MoveModel)
         self._srv_spawn_model = rospy.ServiceProxy(

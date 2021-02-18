@@ -3,10 +3,11 @@ import threading
 from typing import Tuple
 
 from numpy.core.numeric import normalize_axis_tuple
+from numpy.lib.function_base import insert
 import rospy
 import random
 import numpy as np
-
+from scipy.interpolate import interp1d
 import time  # for debuging
 import threading
 # observation msgs
@@ -15,7 +16,7 @@ from geometry_msgs.msg import Pose2D, PoseStamped, PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
 from arena_plan_msgs.msg import RobotState, RobotStateStamped
 from nav_msgs.msg import Path
-
+from scipy.interpolate import interp1d
 # services
 from flatland_msgs.srv import StepWorld, StepWorldRequest
 
@@ -29,7 +30,8 @@ from tf.transformations import *
 from gym import spaces
 import numpy as np
 
-from rl_agent.utils.debug import timeit 
+from rl_agent.utils.debug import timeit
+
 
 class ObservationCollector():
     def __init__(self, ns: str, num_lidar_beams: int, lidar_range: float):
@@ -76,7 +78,7 @@ class ObservationCollector():
             f"{self.ns_prefix}subgoal", PoseStamped, self.callback_subgoal)
 
         self._globalplan_sub = rospy.Subscriber(
-                f'{self.ns_prefix}globalPlan', Path, self.callback_global_plan)
+            f'{self.ns_prefix}globalPlan', Path, self.callback_global_plan)
 
         # service clients
         self._is_train_mode = rospy.get_param("/train_mode")
@@ -84,7 +86,6 @@ class ObservationCollector():
             self._service_name_step = f'{self.ns_prefix}step_world'
             self._sim_step_client = rospy.ServiceProxy(
                 self._service_name_step, StepWorld)
-            
 
     def get_observation_space(self):
         return self.observation_space
@@ -142,7 +143,8 @@ class ObservationCollector():
         return
 
     def callback_global_plan(self, msg_global_plan):
-        self._globalplan = ObservationCollector.process_global_plan_msg(msg_global_plan)
+        self._globalplan = ObservationCollector.process_global_plan_msg(
+            msg_global_plan)
         return
 
     def callback_scan(self, msg_laserscan):
@@ -180,12 +182,13 @@ class ObservationCollector():
     def process_subgoal_msg(self, msg_Subgoal):
         pose2d = self.pose3D_to_pose2D(msg_Subgoal.pose)
         return pose2d
-    
+
     @staticmethod
     def process_global_plan_msg(globalplan):
         global_plan_2d = list(map(
             lambda p: ObservationCollector.pose3D_to_pose2D(p.pose), globalplan.poses))
-        global_plan_np = np.array(list(map(lambda p2d: [p2d.x,p2d.y], global_plan_2d)))
+        global_plan_np = np.array(
+            list(map(lambda p2d: [p2d.x, p2d.y], global_plan_2d)))
         return global_plan_np
 
     @staticmethod
@@ -208,6 +211,117 @@ class ObservationCollector():
             low.extend(space.low.tolist())
             high.extend(space.high.tolist())
         return spaces.Box(np.array(low).flatten(), np.array(high).flatten())
+
+
+class ObservationCollectorWithGP(ObservationCollector):
+    def __init__(self, ns: str, num_lidar_beams: int, lidar_range: float, num_points_global_path: int):
+        """a new Observation collector which collect global path. 
+
+        Args:
+            ns (str): [description]
+            num_lidar_beams (int): [description]
+            lidar_range (float): [description]
+            num_points_global_path (int): [description]
+        """
+        super().__init__(ns, num_lidar_beams, lidar_range)
+        # add new flag for synchonization
+        self._sub_flags['global_path_received'] = False
+        # number of the points we want, maybe set it to 60
+        self._n_gp = num_points_global_path
+        self._globalplan_fixed_size = None
+        # the order is 
+        # [laser_data(num_lidar_beams),
+        #   goal(rho),
+        #   goal(theta),
+        #   global_path_poses_in_robot_frame(rho),
+        #   global_path_poses_in_robot_frame(theta)
+        self.observation_space = ObservationCollector._stack_spaces((
+            spaces.Box(low=0, high=lidar_range, shape=(
+                num_lidar_beams,), dtype=np.float32),
+            spaces.Box(low=0, high=10, shape=(
+                1,), dtype=np.float32),
+            spaces.Box(low=-np.pi, high=np.pi,
+                       shape=(1,), dtype=np.float32),
+            spaces.Box(low=0, high=10, shape=(
+                num_points_global_path), dtype=np.float32),
+            spaces.Box(low=-np.pi, high=np.pi,
+                       shape=(num_points_global_path), dtype=np.float32)
+        ))
+
+    def callback_global_plan(self, msg_global_plan):
+    # overwrite the one in base class for changing the flag
+        with self._sub_flags_con:
+            self._globalplan = ObservationCollector.process_global_plan_msg(
+                msg_global_plan)
+            self._globalplan_fixed_size = self.cal_global_plan_fixed_size()
+            self._sub_flags['global_path_received'] = True
+
+    def get_observations(self):
+        def all_sub_received():
+            ans = True
+            for k, v in self._sub_flags.items():
+                if v is not True:
+                    ans = False
+                    break
+            return ans
+
+        def reset_sub():
+            self._sub_flags = dict((k, False) for k in self._sub_flags.keys())
+
+        if self._is_train_mode:
+            self.call_service_takeSimStep()
+        with self._sub_flags_con:
+            while not all_sub_received():
+                self._sub_flags_con.wait()  # replace it with wait for later
+            reset_sub()
+            self._sub_flags['global_path_received'] = True
+        # rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
+        #print(f"Current observation takes {i} steps for Synchronization")
+        scan = self._scan.ranges.astype(np.float32)
+        rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(
+            self._subgoal, self._robot_pose)
+        rhos,thetas = self._get_poses_in_robot_frame(self._globalplan_fixed_size,self._robot_pose)
+        merged_obs = np.hstack([scan, np.array([rho, theta]),rhos,thetas])
+        obs_dict = {}
+        obs_dict['laser_scan'] = scan
+        obs_dict['goal_in_robot_frame'] = [rho, theta]
+        obs_dict['global_plan'] = self._globalplan
+        obs_dict['robot_pose'] = self._robot_pose
+        return merged_obs, obs_dict
+
+    def require_new_global_path(self):
+        self._sub_flags['global_path_received'] = False
+
+    def cal_global_plan_fixed_size(self, interpolation_method='slinear'):
+        """global plan is an array with the shape (n,2). Since we want to treat the global path
+        as the input, the number of the points need to be fixed. 
+
+
+        Args:
+            interpolation_method (str): 
+        Returns:
+            new_global_plan (np.ndarray) global plan with fixed size
+
+        """
+        SUPPORTED_INTERP_METHODS = ('slinear', 'quadratic', 'cubic')
+        assert interpolation_method in SUPPORTED_INTERP_METHODS, \
+            f"Supported interpolation methods are {SUPPORTED_INTERP_METHODS}"
+        distances = np.cumsum(
+            np.sqrt(np.sum(np.diff(self._globalplan, axis=0)**2, axis=1)))
+        normalized_distances = distances.insert(distances, 0, 0)/distances[-1]
+        f = interp1d(normalized_distances, self._globalplan,
+                     kind=interpolation_method, axis=0)
+        new_global_plan = f(np.linspace(0, 1, self._n_gp))
+        return new_global_plan
+
+    @staticmethod
+    def _get_poses_in_robot_frame(poses: np.array, robot_pos: Pose2D):
+        robot_pos_np = np.array([robot_pos.x, robot_pos.y])
+        relative_poses = poses - robot_pos_np
+        rhos = np.sqrt(np.sum(relative_poses**2, axis=1))
+        thetas = np.mod(np.arctan2(relative_poses[:, 1], relative_poses[:, 0])
+                        - robot_pos.theta+4*np.pi, 2*np.pi)-np.pi
+        return rhos, thetas
 
 
 if __name__ == '__main__':

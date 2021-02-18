@@ -118,9 +118,9 @@ class FlatlandEnv(gym.Env):
             else:
                 linear_range = setting_data['robot']['continuous_actions']['linear_range']
                 angular_range = setting_data['robot']['continuous_actions']['angular_range']
-                self.action_space = spaces.Box(low=np.array([linear_range[0], angular_range[0]]),
+                self.action_space = spaces.Box(low=np.array([linear_range[0], angular_range[0]],dtype=np.float),
                                                high=np.array(
-                                                   [linear_range[1], angular_range[1]]),
+                                                   [linear_range[1], angular_range[1]],dtype=np.float),
                                                dtype=np.float)
 
     def _pub_action(self, action):
