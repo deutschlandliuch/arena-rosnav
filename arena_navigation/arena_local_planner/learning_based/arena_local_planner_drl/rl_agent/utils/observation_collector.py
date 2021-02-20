@@ -4,6 +4,7 @@ from typing import Tuple
 
 from numpy.core.numeric import normalize_axis_tuple
 from numpy.lib.function_base import insert
+from geometry_msgs import msg
 import rospy
 import random
 import numpy as np
@@ -29,11 +30,11 @@ from tf.transformations import *
 
 from gym import spaces
 import numpy as np
-
+from time import time
 from rl_agent.utils.debug import timeit
 
 
-class ObservationCollector():
+class ObservationCollector:
     def __init__(self, ns: str, num_lidar_beams: int, lidar_range: float):
         """ a class to collect and merge observations
 
@@ -49,9 +50,9 @@ class ObservationCollector():
 
         # define observation_space
         self.observation_space = ObservationCollector._stack_spaces((
-            spaces.Box(low=0, high=lidar_range, shape=(
+            spaces.Box(low=0.0, high=float(lidar_range), shape=(
                 num_lidar_beams,), dtype=np.float32),
-            spaces.Box(low=0, high=10, shape=(1,), dtype=np.float32),
+            spaces.Box(low=0.0, high=10.0, shape=(1,), dtype=np.float32),
             spaces.Box(low=-np.pi, high=np.pi, shape=(1,), dtype=np.float32)
         ))
 
@@ -60,32 +61,38 @@ class ObservationCollector():
         self._robot_vel = Twist()
         self._subgoal = Pose2D()
         self._globalplan = Path()
-
+        # a list of subscriber
+        self._sub_list = []
         # message_filter subscriber: laserscan, robot_pose
         self._scan_sub = rospy.Subscriber(
             f'{self.ns_prefix}scan', LaserScan, self.callback_scan, tcp_nodelay=True)
+        self._sub_list.append(self._scan_sub)
         self._robot_state_sub = rospy.Subscriber(
             f'{self.ns_prefix}robot_state', RobotStateStamped, self.callback_robot_state, tcp_nodelay=True)
         #
+        self._sub_list.append(self._robot_state_sub)
         self._sub_flags = {"scan_updated": False, "robot_state_updated": False}
         self._sub_flags_con = threading.Condition()
-
         # topic subscriber: subgoal
         # TODO should we synchronize it with other topics
         #self._subgoal_sub = message_filters.Subscriber(f'{self.ns_prefix}subgoal', PoseStamped)
         # self._subgoal_sub.registerCallback(self.callback_subgoal)
         self._subgoal_sub = rospy.Subscriber(
-            f"{self.ns_prefix}subgoal", PoseStamped, self.callback_subgoal)
-
+            f"{self.ns_prefix}subgoal", PoseStamped, self.callback_subgoal, tcp_nodelay=True)
+        self._sub_list.append(self._subgoal_sub)
         self._globalplan_sub = rospy.Subscriber(
-            f'{self.ns_prefix}globalPlan', Path, self.callback_global_plan)
-
+            f'{self.ns_prefix}globalPlan', Path, self.callback_global_plan, tcp_nodelay=True)
+        self._sub_list.append(self._globalplan_sub)
         # service clients
         self._is_train_mode = rospy.get_param("/train_mode")
         if self._is_train_mode:
             self._service_name_step = f'{self.ns_prefix}step_world'
             self._sim_step_client = rospy.ServiceProxy(
                 self._service_name_step, StepWorld)
+
+    def unregister_all(self):
+        for sub in self._sub_list:
+            sub.unregister()
 
     def get_observation_space(self):
         return self.observation_space
@@ -226,10 +233,12 @@ class ObservationCollectorWithGP(ObservationCollector):
         super().__init__(ns, num_lidar_beams, lidar_range)
         # add new flag for synchonization
         self._sub_flags['global_path_received'] = False
+        self._global_path_time_stamp = None
+
         # number of the points we want, maybe set it to 60
         self._n_gp = num_points_global_path
         self._globalplan_fixed_size = None
-        # the order is 
+        # the order is
         # [laser_data(num_lidar_beams),
         #   goal(rho),
         #   goal(theta),
@@ -243,18 +252,24 @@ class ObservationCollectorWithGP(ObservationCollector):
             spaces.Box(low=-np.pi, high=np.pi,
                        shape=(1,), dtype=np.float32),
             spaces.Box(low=0, high=10, shape=(
-                num_points_global_path), dtype=np.float32),
+                num_points_global_path,), dtype=np.float32),
             spaces.Box(low=-np.pi, high=np.pi,
-                       shape=(num_points_global_path), dtype=np.float32)
+                       shape=(num_points_global_path,), dtype=np.float32)
         ))
 
-    def callback_global_plan(self, msg_global_plan):
-    # overwrite the one in base class for changing the flag
+    def callback_global_plan(self, msg_global_plan: Path):
+        # compare the timestamp
+        if self._global_path_time_stamp is not None \
+                and msg_global_plan.header.stamp == self._global_path_time_stamp:
+            return
+
         with self._sub_flags_con:
             self._globalplan = ObservationCollector.process_global_plan_msg(
                 msg_global_plan)
             self._globalplan_fixed_size = self.cal_global_plan_fixed_size()
             self._sub_flags['global_path_received'] = True
+            self._global_path_time_stamp = msg_global_plan.header.stamp
+            self._sub_flags_con.notify()
 
     def get_observations(self):
         def all_sub_received():
@@ -271,26 +286,35 @@ class ObservationCollectorWithGP(ObservationCollector):
         if self._is_train_mode:
             self.call_service_takeSimStep()
         with self._sub_flags_con:
-            while not all_sub_received():
-                self._sub_flags_con.wait()  # replace it with wait for later
+            # check all_sub_received and wait for maximum 1s
+            self._sub_flags_con.wait_for(all_sub_received, 1)
+            # if not, then it must be timeout
+            timeout = not all_sub_received()
+            # reset all flags but set global_path_received to True
+            # so that next time we will not wait for it
             reset_sub()
             self._sub_flags['global_path_received'] = True
+            if timeout:
+                    return None, None, False
         # rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
         #print(f"Current observation takes {i} steps for Synchronization")
         scan = self._scan.ranges.astype(np.float32)
         rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(
             self._subgoal, self._robot_pose)
-        rhos,thetas = self._get_poses_in_robot_frame(self._globalplan_fixed_size,self._robot_pose)
-        merged_obs = np.hstack([scan, np.array([rho, theta]),rhos,thetas])
+        rhos, thetas = self._get_poses_in_robot_frame(
+            self._globalplan_fixed_size, self._robot_pose)
+        merged_obs = np.hstack([scan, np.array([rho, theta]), rhos, thetas])
         obs_dict = {}
         obs_dict['laser_scan'] = scan
         obs_dict['goal_in_robot_frame'] = [rho, theta]
         obs_dict['global_plan'] = self._globalplan
         obs_dict['robot_pose'] = self._robot_pose
-        return merged_obs, obs_dict
+        # the last one indicate whether we get the observation successfully or not
+        return merged_obs, obs_dict, True
 
     def require_new_global_path(self):
-        self._sub_flags['global_path_received'] = False
+        with self._sub_flags_con:
+            self._sub_flags['global_path_received'] = False
 
     def cal_global_plan_fixed_size(self, interpolation_method='slinear'):
         """global plan is an array with the shape (n,2). Since we want to treat the global path
@@ -308,7 +332,7 @@ class ObservationCollectorWithGP(ObservationCollector):
             f"Supported interpolation methods are {SUPPORTED_INTERP_METHODS}"
         distances = np.cumsum(
             np.sqrt(np.sum(np.diff(self._globalplan, axis=0)**2, axis=1)))
-        normalized_distances = distances.insert(distances, 0, 0)/distances[-1]
+        normalized_distances = np.insert(distances, 0, 0)/distances[-1]
         f = interp1d(normalized_distances, self._globalplan,
                      kind=interpolation_method, axis=0)
         new_global_plan = f(np.linspace(0, 1, self._n_gp))
