@@ -128,7 +128,7 @@ class ObservationCollector():
                 i += 1
 
         #rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
-        print(f"Current observation takes {i} steps for Synchronization")
+        #print(f"Current observation takes {i} steps for Synchronization")
 
         scan = self._scan.ranges.astype(np.float32)
         rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(
