@@ -19,7 +19,6 @@ from nav_msgs.msg import Path
 # services
 from flatland_msgs.srv import StepWorld, StepWorldRequest
 
-
 # message filter
 import message_filters
 
@@ -60,18 +59,31 @@ class ObservationCollector():
         self._globalplan = np.array([])
 
         # message_filter subscriber: laserscan, robot_pose
-        self._scan_sub = rospy.Subscriber(
-            f'{self.ns_prefix}scan', LaserScan, self.callback_scan, tcp_nodelay=True)
-        self._robot_state_sub = rospy.Subscriber(
-            f'{self.ns_prefix}robot_state', RobotStateStamped, self.callback_robot_state, tcp_nodelay=True)
-        #
-        self._sub_flags = {"scan_updated": False, "robot_state_updated": False}
-        self._sub_flags_con = threading.Condition()
+        # flag of new sensor info
+        self._data_received = False
+
+        self._scan_sub = message_filters.Subscriber(
+            f'{self.ns_prefix}scan', LaserScan)
+        self._robot_state_sub = message_filters.Subscriber(
+            f'{self.ns_prefix}robot_state', RobotStateStamped)
+
+        self._time_sync = message_filters.ApproximateTimeSynchronizer(
+            [self._scan_sub, self._robot_state_sub], 100, slop=0.025)
+        self._time_sync.registerCallback(self.callback_observation_received)
+
+        # self._scan_sub = rospy.Subscriber(
+        #     f'{self.ns_prefix}scan', LaserScan, self.callback_scan, tcp_nodelay=True)
+        # self._robot_state_sub = rospy.Subscriber(
+        #     f'{self.ns_prefix}robot_state', RobotStateStamped, self.callback_robot_state, tcp_nodelay=True)
+        # #
+        # self._sub_flags = {"scan_updated": False, "robot_state_updated": False}
+        # self._sub_flags_con = threading.Condition(self.callback_observation_received)
 
         # topic subscriber: subgoal
         # TODO should we synchronize it with other topics
         #self._subgoal_sub = message_filters.Subscriber(f'{self.ns_prefix}subgoal', PoseStamped)
         # self._subgoal_sub.registerCallback(self.callback_subgoal)
+
         self._subgoal_sub = rospy.Subscriber(
             f"{self.ns_prefix}subgoal", PoseStamped, self.callback_subgoal)
 
@@ -84,31 +96,40 @@ class ObservationCollector():
             self._service_name_step = f'{self.ns_prefix}step_world'
             self._sim_step_client = rospy.ServiceProxy(
                 self._service_name_step, StepWorld)
-            
 
     def get_observation_space(self):
         return self.observation_space
 
     def get_observations(self):
-        def all_sub_received():
-            ans = True
-            for k, v in self._sub_flags.items():
-                if v is not True:
-                    ans = False
-                    break
-            return ans
+        # def all_sub_received():
+        #     ans = True
+        #     for k, v in self._sub_flags.items():
+        #         if v is not True:
+        #             ans = False
+        #             break
+        #     return ans
 
-        def reset_sub():
-            self._sub_flags = dict((k, False) for k in self._sub_flags.keys())
+        # def reset_sub():
+        #     self._sub_flags = dict((k, False) for k in self._sub_flags.keys())
 
+        # if self._is_train_mode:
+        #     self.call_service_takeSimStep()
+        # with self._sub_flags_con:
+        #     while not all_sub_received():
+        #         self._sub_flags_con.wait()  # replace it with wait for later
+        #     reset_sub()
+
+        # reset flag
+        self._data_received = False
         if self._is_train_mode:
-            self.call_service_takeSimStep()
-        with self._sub_flags_con:
-            while not all_sub_received():
-                self._sub_flags_con.wait()  # replace it with wait for later
-            reset_sub()
-        # rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
-        #print(f"Current observation takes {i} steps for Synchronization")
+            i = 0
+            while(not self._data_received):
+                self.call_service_takeSimStep()
+                i += 1
+
+        #rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
+        print(f"Current observation takes {i} steps for Synchronization")
+
         scan = self._scan.ranges.astype(np.float32)
         rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(
             self._subgoal, self._robot_pose)
@@ -167,6 +188,12 @@ class ObservationCollector():
         with self._sub_flags_con:
             self._sub_flags['robot_state_updated'] = True
             self._sub_flags_con.notify()
+
+    def callback_observation_received(self, msg_LaserScan, msg_RobotState):
+        self._scan = self.process_scan_msg(msg_LaserScan)
+        self._robot_pose, self._robot_vel = self.process_robot_state_msg(
+            msg_RobotState)
+        self._data_received = True
 
     def process_scan_msg(self, msg_LaserScan):
         # remove_nans_from_scan
