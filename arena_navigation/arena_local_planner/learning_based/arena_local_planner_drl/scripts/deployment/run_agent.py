@@ -26,7 +26,7 @@ if __name__ == "__main__":
         'robot_setting' : os.path.join(rospkg.RosPack().get_path('simulator_setup'), 'robot', 'myrobot.model.yaml'),
         'robot_as' : os.path.join(rospkg.RosPack().get_path('arena_local_planner_drl'), 'configs', 'default_settings.yaml'),
         'scenerios_json_path' : os.path.join(rospkg.RosPack().get_path('simulator_setup'), 'scenerios', args.scenario+'.json'),
-        'curriculum': os.path.join(dir, 'configs', 'training_curriculum.yaml')
+        'curriculum': os.path.join(dir, 'configs', 'training_curriculum_map1small.yaml')
     }
 
     assert os.path.isfile(

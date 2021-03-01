@@ -68,7 +68,7 @@ class ObservationCollector():
             f'{self.ns_prefix}robot_state', RobotStateStamped)
 
         self._time_sync = message_filters.ApproximateTimeSynchronizer(
-            [self._scan_sub, self._robot_state_sub], 100, slop=0.025)
+            [self._scan_sub, self._robot_state_sub], 25, slop=0.1)
         self._time_sync.registerCallback(self.callback_observation_received)
 
         # self._scan_sub = rospy.Subscriber(
