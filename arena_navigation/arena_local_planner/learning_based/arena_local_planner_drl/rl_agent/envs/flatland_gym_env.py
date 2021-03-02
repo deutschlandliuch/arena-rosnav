@@ -79,9 +79,11 @@ class FlatlandEnv(gym.Env):
         self.task = task
         self._steps_curr_episode = 0
         self._max_steps_per_episode = max_steps_per_episode
+        
         # # get observation
         # obs=self.observation_collector.get_observations()
-
+    
+    
     def setup_by_configuration(self, robot_yaml_path: str, settings_yaml_path: str):
         """get the configuration from the yaml file, including robot radius, discrete action space and continuous action space.
 
@@ -143,6 +145,7 @@ class FlatlandEnv(gym.Env):
                         1   -   collision with obstacle
                         2   -   goal reached
         """
+        
         if self._is_action_space_discrete:
             action = self._translate_disc_action(action)
         self._pub_action(action)
@@ -152,6 +155,7 @@ class FlatlandEnv(gym.Env):
         merged_obs, obs_dict = self.observation_collector.get_observations()
         # print("get observation: {}".format(time.time()-s))
 
+      
         # calculate reward
         reward, reward_info = self.reward_calculator.get_reward(
             obs_dict['laser_scan'], obs_dict['goal_in_robot_frame'], 
@@ -159,6 +163,7 @@ class FlatlandEnv(gym.Env):
         # print(f"cum_reward: {reward}")
         done = reward_info['is_done']
         
+    
         # info
         info = {}
         if done:
@@ -171,7 +176,7 @@ class FlatlandEnv(gym.Env):
             info['done_reason'] = 0
             info['is_success'] = 0
             self.reward_calculator.kdtree = None
-
+        
         return merged_obs, reward, done, info
 
     def reset(self):
@@ -185,6 +190,7 @@ class FlatlandEnv(gym.Env):
         self.reward_calculator.reset()
         self._steps_curr_episode = 0
         obs, _ = self.observation_collector.get_observations()
+        
         return obs  # reward, done, info can't be included
 
     def close(self):

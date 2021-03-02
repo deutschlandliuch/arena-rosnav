@@ -68,7 +68,7 @@ class ObservationCollector():
             f'{self.ns_prefix}robot_state', RobotStateStamped)
 
         self._time_sync = message_filters.ApproximateTimeSynchronizer(
-            [self._scan_sub, self._robot_state_sub], 25, slop=0.1)
+            [self._scan_sub, self._robot_state_sub], 30, slop=0.009) 
         self._time_sync.registerCallback(self.callback_observation_received)
 
         # self._scan_sub = rospy.Subscriber(
@@ -92,10 +92,11 @@ class ObservationCollector():
 
         # service clients
         self._is_train_mode = rospy.get_param("/train_mode")
-        if self._is_train_mode:
-            self._service_name_step = f'{self.ns_prefix}step_world'
-            self._sim_step_client = rospy.ServiceProxy(
-                self._service_name_step, StepWorld)
+
+        # if self._is_train_mode:
+        #     self._service_name_step = f'{self.ns_prefix}step_world'
+        #     self._sim_step_client = rospy.ServiceProxy(
+        #         self._service_name_step, StepWorld)
 
     def get_observation_space(self):
         return self.observation_space
@@ -120,25 +121,29 @@ class ObservationCollector():
         #     reset_sub()
 
         # reset flag
-        self._data_received = False
-        if self._is_train_mode:
-            i = 0
-            while(not self._data_received):
-                self.call_service_takeSimStep()
-                i += 1
+        # self._data_received = False
+        # i = 0
+        # now = rospy.get_rostime()
+        # while(not self._data_received):
 
-        #rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
-        #print(f"Current observation takes {i} steps for Synchronization")
+        #     # timer = time.time()
+        #     # self.call_service_takeSimStep()
+        #     # print(f"step world: {time.time()-timer}s")
+        #     time.sleep(0.0001) # need to be considered
+        # #rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
+        # #print(f"Current observation took {i}s for synchronization")
 
         scan = self._scan.ranges.astype(np.float32)
         rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(
             self._subgoal, self._robot_pose)
+
         merged_obs = np.hstack([scan, np.array([rho, theta])])
         obs_dict = {}
         obs_dict['laser_scan'] = scan
         obs_dict['goal_in_robot_frame'] = [rho, theta]
         obs_dict['global_plan'] = self._globalplan
         obs_dict['robot_pose'] = self._robot_pose
+
         return merged_obs, obs_dict
 
     @staticmethod
