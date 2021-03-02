@@ -15,6 +15,7 @@ from geometry_msgs.msg import Pose2D, PoseStamped, PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
 from arena_plan_msgs.msg import RobotState, RobotStateStamped
 from nav_msgs.msg import Path
+from rosgraph_msgs.msg import Clock 
 
 # services
 from flatland_msgs.srv import StepWorld, StepWorldRequest
@@ -68,8 +69,9 @@ class ObservationCollector():
             f'{self.ns_prefix}robot_state', RobotStateStamped)
 
         self._time_sync = message_filters.ApproximateTimeSynchronizer(
-            [self._scan_sub, self._robot_state_sub], 30, slop=0.009) 
+            [self._scan_sub, self._robot_state_sub], 30, slop=0.01) 
         self._time_sync.registerCallback(self.callback_observation_received)
+
 
         # self._scan_sub = rospy.Subscriber(
         #     f'{self.ns_prefix}scan', LaserScan, self.callback_scan, tcp_nodelay=True)
@@ -77,7 +79,7 @@ class ObservationCollector():
         #     f'{self.ns_prefix}robot_state', RobotStateStamped, self.callback_robot_state, tcp_nodelay=True)
         # #
         # self._sub_flags = {"scan_updated": False, "robot_state_updated": False}
-        # self._sub_flags_con = threading.Condition(self.callback_observation_received)
+        # self._sub_flags_con = threading.Condition()
 
         # topic subscriber: subgoal
         # TODO should we synchronize it with other topics
@@ -88,8 +90,10 @@ class ObservationCollector():
             f"{self.ns_prefix}subgoal", PoseStamped, self.callback_subgoal)
 
         self._globalplan_sub = rospy.Subscriber(
-                f'{self.ns_prefix}globalPlan', Path, self.callback_global_plan)
+            f'{self.ns_prefix}globalPlan', Path, self.callback_global_plan)
 
+        self._clock_sub = rospy.Subscriber(
+            f'{self.ns_prefix}clock', Clock, self.callback_clock)
         # service clients
         self._is_train_mode = rospy.get_param("/train_mode")
 
@@ -115,23 +119,29 @@ class ObservationCollector():
 
         # if self._is_train_mode:
         #     self.call_service_takeSimStep()
+
+        
         # with self._sub_flags_con:
         #     while not all_sub_received():
         #         self._sub_flags_con.wait()  # replace it with wait for later
         #     reset_sub()
 
-        # reset flag
-        # self._data_received = False
-        # i = 0
-        # now = rospy.get_rostime()
-        # while(not self._data_received):
 
-        #     # timer = time.time()
-        #     # self.call_service_takeSimStep()
-        #     # print(f"step world: {time.time()-timer}s")
-        #     time.sleep(0.0001) # need to be considered
-        # #rospy.logdebug(f"Current observation takes {i} steps for Synchronization")
-        # #print(f"Current observation took {i}s for synchronization")
+        # reset flag
+        self._data_received = False
+
+        now = self._clock
+        while(not self._data_received):
+
+            # timer = time.time()
+            # self.call_service_takeSimStep()
+            # print(f"step world: {time.time()-timer}s")
+            #time.sleep(0.0001) # need to be considered
+            rospy.sleep(0.0002)
+
+        print(f"time in sim to synchronize: {self._clock-now}")
+        syn = True if self.scan_stamp == self.rs_stamp else False
+        print(f"synchronized: {syn}")
 
         scan = self._scan.ranges.astype(np.float32)
         rho, theta = ObservationCollector._get_goal_pose_in_robot_frame(
@@ -173,6 +183,10 @@ class ObservationCollector():
         except rospy.ServiceException as e:
             rospy.logdebug("step Service call failed: %s" % e)
 
+    def callback_clock(self, msg_Clock):
+        self._clock = msg_Clock.clock.to_sec()
+        return
+
     def callback_subgoal(self, msg_Subgoal):
         self._subgoal = self.process_subgoal_msg(msg_Subgoal)
         return
@@ -182,12 +196,14 @@ class ObservationCollector():
         return
 
     def callback_scan(self, msg_laserscan):
+        self.scan_stamp = round(msg_laserscan.header.stamp.to_sec(), 3)
         self._scan = self.process_scan_msg(msg_laserscan)
         with self._sub_flags_con:
             self._sub_flags['scan_updated'] = True
             self._sub_flags_con.notify()
 
     def callback_robot_state(self, msg_robotstate):
+        self.rs_stamp = round(msg_robotstate.header.stamp.to_sec(), 3)
         self._robot_pose, self._robot_vel = self.process_robot_state_msg(
             msg_robotstate)
         with self._sub_flags_con:

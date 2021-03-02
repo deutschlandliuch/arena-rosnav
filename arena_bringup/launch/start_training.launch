@@ -4,7 +4,7 @@
   <arg name="ns_prefix" default="sim" />
   <arg name="num_envs" default="1" /> 
   <!-- To make the training more efficient make sure this step_size*laser_update_rate == 1  --> <!-- 0.01 real_sec -->
-  <arg name="step_size"       default="0.01"/>         <!-- sensor pub rate, action rate odom 100Hz, laser 50 Hz, action  0.03+0.02=0.05  20Hz sim -->     
+  <arg name="step_size"       default="0.05"/>         <!-- sensor pub rate, action rate odom 100Hz, laser 50 Hz, action  0.03+0.02=0.05  20Hz sim -->     
   <arg name="update_rate"     default="100.0"/>        <!-- update rate depends on computer power, and eval  every 0.001 real sec,  0.005 sim_sec     ,0.02 real_sec =  0.05 sim_sec    1 tick 0.005 sim-sec,   0.002real_sec   1/0.002=500hz -->    
   <arg name="action_pub_rate" default="5"/>  
   <!-- the folder name under the path simulator_setup/maps  -->
